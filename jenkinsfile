@@ -1,37 +1,40 @@
-pipeline{
+pipeline {
     agent any
-    tools{
+    tools {
         jdk 'jdk17'
         nodejs 'node16'
     }
     environment {
-        SCANNER_HOME=tool 'sonar-scanner'
+        SCANNER_HOME = tool 'sonar-scanner'
+        IMAGE_NAME = 'shariq81/netflix:latest'
+        CONTAINER_NAME = 'netflix'
+        DEPLOY_PORT = '8081'
     }
     stages {
-        stage('clean workspace'){
-            steps{
+        stage('clean workspace') {
+            steps {
                 cleanWs()
             }
         }
-        stage('Checkout from Git'){
-            steps{
-                git branch: 'main', url: 'https://github.com/Aj7Ay/Netflix-clone.git'
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Shariq81/netflix-clone.git'
             }
         }
-        stage("Sonarqube Analysis "){
-            steps{
+        stage("Sonarqube Analysis") {
+            steps {
                 withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
-                    -Dsonar.projectKey=Netflix '''
+                    sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix'''
                 }
             }
         }
-        stage("quality gate"){
-           steps {
+        stage("quality gate") {
+            steps {
                 script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
                 }
-            } 
+            }
         }
         stage('Install Dependencies') {
             steps {
@@ -49,26 +52,65 @@ pipeline{
                 sh "trivy fs . > trivyfs.txt"
             }
         }
-        stage("Docker Build & Push"){
-            steps{
-                script{
-                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){   
-                       sh "docker build --build-arg TMDB_V3_API_KEY=176920b2581cd914f444e2aaf0f977ce -t netflix ."
-                       sh "docker tag netflix shariq81/netflix:latest "
-                       sh "docker push shariq81/netflix:latest "
+        stage("Docker Build & Push") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh "docker build --build-arg TMDB_V3_API_KEY=176920b2581cd914f444e2aaf0f977ce -t netflix ."
+                        sh "docker tag netflix shariq81/netflix:latest"
+                        sh "docker push shariq81/netflix:latest"
                     }
                 }
             }
         }
-        stage("TRIVY"){
-            steps{
-                sh "trivy image shariq81/netflix:latest > trivyimage.txt" 
+        stage("TRIVY") {
+            steps {
+                sh "trivy image shariq81/netflix:latest > trivyimage.txt"
             }
         }
-        stage('Deploy to container'){
-            steps{
-                sh 'docker run -d -p 8081:80 shariq81/netflix:latest'
+        stage('Prepare and Deploy Docker Container') {
+            steps {
+                script {
+                    // Check for any existing containers from the same image
+                    echo "Checking for containers created from the image ${IMAGE_NAME}"
+                    def existingContainers = sh(script: "docker ps -a --filter ancestor=${IMAGE_NAME} --format '{{.ID}}'", returnStdout: true).trim()
+                    
+                    if (existingContainers) {
+                        // If containers exist, stop and remove them
+                        echo "Stopping and removing containers created from the image ${IMAGE_NAME}"
+                        existingContainers.tokenize().each { containerId ->
+                            sh "docker stop ${containerId}"
+                            sh "docker rm ${containerId}"
+                        }
+                    } else {
+                        echo "No existing containers to remove."
+                    }
+
+                    // Check and remove the container by name if it exists
+                    def checkContainer = sh(script: "docker ps -q -f name=${CONTAINER_NAME}", returnStdout: true).trim()
+                    if (checkContainer) {
+                        echo "Stopping and removing existing container ${CONTAINER_NAME}"
+                        sh "docker stop ${CONTAINER_NAME}"
+                        sh "docker rm ${CONTAINER_NAME}"
+                    }
+
+                    // Deploy the new container
+                    echo "Deploying new container ${CONTAINER_NAME}"
+                    sh "docker run -d -p ${DEPLOY_PORT}:80 --name ${CONTAINER_NAME} ${IMAGE_NAME}"
+                    }
+                }
             }
-         }
-    }
+        }           
+    
+    post {
+        always {
+            emailext attachLog: true,
+            subject: "'${currentBuild.result}'",
+            body: "Project: ${env.JOB_NAME}<br/>" +
+                "Build Number: ${env.BUILD_NUMBER}<br/>" +
+                "URL: ${env.BUILD_URL}<br/>",
+            to: 'stuffe94@gmail.com', // Adjust the email recipient as needed
+            attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
+        }
+    }      
 }
